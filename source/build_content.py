@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Build app/content.js from the orals data module and the digital guide HTML.
+
+Run from anywhere:  python3 build_content.py
+Reads:
+  ../../chief-mate-orals/source/data.py
+  ../../mca-digital-guide/source/guide.html
+Writes:
+  ../app/content.js
+"""
+
+import json
+import re
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[1]  # deliverables/
+ORALS_SRC = ROOT / "chief-mate-orals" / "source"
+GUIDE_HTML = ROOT / "mca-digital-guide" / "source" / "guide.html"
+OUT = HERE.parent / "app" / "content.js"
+
+sys.path.insert(0, str(ORALS_SRC))
+import data  # noqa: E402
+
+
+def orals_content():
+    competences = []
+    for group in (data.NAV_CARDS, data.CARGO_CARDS, data.CONTROL_CARDS):
+        for c in group:
+            num = c["num"]
+            deep = data.DEEP.get(num)
+            competences.append({
+                "num": num,
+                "func": c["func"],
+                "title": c["title"],
+                "one": c["one"],
+                "know": c["know"],
+                "steps": c.get("steps", []),
+                "trap": c.get("trap", ""),
+                "example": c.get("example", ""),
+                "checks": c.get("checks", []),
+                "questions": c.get("questions", []),
+                "say": data.SAY.get(num, ""),
+                "deep": "".join(deep) if deep else "",
+            })
+    parts = []
+    for key, p in data.PARTS.items():
+        parts.append({
+            "key": key,
+            "label": p["label"],
+            "title": p["title"],
+            "sub": p["sub"],
+            "color": p["color"],
+            "range": p["range"],
+            "about": p["about"],
+            "thread": p["thread"],
+        })
+    return {
+        "parts": parts,
+        "competences": competences,
+        "rules": data.ORAL_RULES,
+        "priority": data.PRIORITY,
+        "revision": data.REVISION_ORDER,
+        "warmup": data.WARMUP,
+        "star": data.STAR,
+        "acts": data.ACTS,
+        "regs": data.REGS,
+        "weeks": [{"n": w["n"], "title": w["title"], "focus": w["focus"], "output": w["output"]} for w in data.WEEKS],
+        "lastWeek": data.LAST_WEEK,
+        "questions": data.QUESTIONS,
+        "sourceLine": data.SOURCE_LINE,
+        "audience": data.AUDIENCE,
+    }
+
+
+# ---------- digital guide ----------
+
+def convert_tables(html, counter):
+    """Turn each <table> into a list of row cards so it fits a phone screen."""
+
+    def table_repl(m):
+        body = m.group(0)
+        is_outcome = "<th>Item</th>" in body or "<th style=\"width:10%\">Item</th>" in body
+        rows = re.findall(r"<tr>(.*?)</tr>", body, flags=re.S)
+        out = ['<div class="trows">']
+        for r in rows:
+            if "<th" in r:
+                continue
+            cells = [re.sub(r"\s+", " ", c).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", r, flags=re.S)]
+            if not cells:
+                continue
+            attrs = ""
+            if is_outcome and len(cells) >= 3:
+                counter[0] += 1
+                attrs = f' data-oid="o{counter[0]}"'
+            head = cells[0]
+            rest = cells[1:]
+            body_html = " ".join(f"<span>{c}</span>" for c in rest) if rest else ""
+            out.append(f'<div class="trow"{attrs}><b>{head}</b> {body_html}</div>')
+        out.append("</div>")
+        return "".join(out)
+
+    return re.sub(r"<table>.*?</table>", table_repl, html, flags=re.S)
+
+
+def digital_content():
+    raw = GUIDE_HTML.read_text(encoding="utf-8")
+    body = re.search(r"<body>(.*)</body>", raw, flags=re.S).group(1)
+    # Remove the page-break printing headers and the printed title
+    body = re.sub(r"<h1>.*?</h1>", "", body, flags=re.S)
+    body = re.sub(r'class="nobreak"', "", body)
+    body = re.sub(r"<p class=\"small\">Count check.*?</p>", "", body, flags=re.S)
+
+    counter = [0]
+    body = convert_tables(body, counter)
+
+    parts = re.split(r"(?=<h2[ >])", body)
+    intro = parts[0]
+    sections = []
+    for block in parts[1:]:
+        title = re.search(r"<h2[^>]*>(.*?)</h2>", block, flags=re.S).group(1).strip()
+        rest = re.sub(r"<h2[^>]*>.*?</h2>", "", block, count=1, flags=re.S)
+        subs = []
+        pieces = re.split(r"(?=<h3>)", rest)
+        lead = pieces[0].strip()
+        for p in pieces[1:]:
+            t = re.search(r"<h3>(.*?)</h3>", p, flags=re.S).group(1).strip()
+            h = re.sub(r"<h3>.*?</h3>", "", p, count=1, flags=re.S).strip()
+            subs.append({"title": t, "html": h})
+        sections.append({
+            "id": f"s{len(sections) + 1}",
+            "title": title,
+            "lead": lead,
+            "subs": subs,
+        })
+    return {
+        "intro": intro.strip(),
+        "sections": sections,
+        "outcomeCount": counter[0],
+    }
+
+
+def main():
+    content = {
+        "orals": orals_content(),
+        "digital": digital_content(),
+    }
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(
+        "/* Generated by source/build_content.py. Do not edit by hand. */\n"
+        "window.CONTENT = " + json.dumps(content, ensure_ascii=False, indent=1) + ";\n",
+        encoding="utf-8",
+    )
+    d = content["digital"]
+    print(f"competences: {len(content['orals']['competences'])}")
+    print(f"questions: {len(content['orals']['questions'])}")
+    print(f"digital sections: {len(d['sections'])}, outcome rows: {d['outcomeCount']}")
+    print(f"wrote {OUT}")
+
+
+if __name__ == "__main__":
+    main()
